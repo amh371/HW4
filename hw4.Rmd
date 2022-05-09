@@ -1,21 +1,20 @@
 ---
 title: "SOC360 Homework 4: Machine learning"
-author: "Your name here"
+author: "Anthony Hayek"
 output:
   html_document: default
   pdf_document: default
 ---
 
+
 ```{r setup, include=FALSE}
 # Do not edit this chunk
-
 # The following lines define how the output of code chunks should behave
 knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(include = TRUE)
 knitr::opts_chunk$set(warning = FALSE)
 knitr::opts_chunk$set(message = FALSE)
 knitr::opts_chunk$set(error = TRUE)
-
 # Required packages, please install any you do not have
 library(rmarkdown)
 library(tidyverse)
@@ -27,7 +26,7 @@ library(viridis)
 library(tidymodels)
 library(textrecipes)
 library(glmnet)
-
+library(readr)
 set.seed(08901)
 ```
 
@@ -51,7 +50,8 @@ Once you have finished the assignment please complete the following steps to sub
 ## Loading the data
 We're going to be working with the Twitter politics dataset you used in the previous homework. This time you will be attempting to predict whether a tweet is written by a Democrat or a Republican.
 ```{r loading data, echo=FALSE, tidy=TRUE, eval=TRUE, include=FALSE}
-data <- read_csv("data/politics_twitter.csv") %>% select(screen_name, text)
+urldata <- "https://raw.githubusercontent.com/amh371/HW4/main/data/politics_twitter.csv"
+data <- read_csv(url(urldata)) %>% select(screen_name, text)
 data$party <- ifelse(data$screen_name %in% c("JoeBiden", "KamalaHarris", "SpeakerPelosi", "BernieSanders", "AOC", "SenSchumer"),
                      "Democrat", "Republican")
 data <- data %>% 
@@ -65,6 +65,11 @@ data <- data %>%
 Q1. Before doing any modeling, its worth assessing whether there are any differences between the tweets by Republicans and Democrats with respect to how much they tweet. In the cell below, write a line of code to calculate the total number of tweets written by each group.
 
 ```{r q1, echo=FALSE, tidy=TRUE, eval=TRUE, include=FALSE}
+data$democrats <- str_count(data$party,"Democrat")
+data$republicans <- str_count(data$party, "Republican")
+sum(data$republicans)
+sum(data$democrats)
+
 
 ```
 
@@ -79,7 +84,8 @@ data <- bind_rows(rep.sample, dem.sample)
 
 Q2. Now that we have our dataset, we can start to construct the modeling pipeline. The first step is to take a test-train split. Add arguments to `initial_split` to create a split where 10% of the data are held-out for testing and the classes are evenly balanced across test and training sets
 ```{r q2, echo=FALSE, tidy=TRUE, eval=TRUE, include=FALSE}
-data_split <- initial_split()
+sample <- rbind(dem.sample, rep.sample)
+data_split <- initial_split(sample, 1/10)
 train <- training(data_split)
 test <- testing(data_split)
 ```
@@ -95,9 +101,19 @@ Q3. Now we want to put together a recipe. The first line specifies that we are m
 
 You can use `prep` and `bake` to run this process and view the resulting feature matrix.
 ```{r q3, echo=FALSE, tidy=TRUE, eval=TRUE, include=FALSE}
-party_recipe <- recipe(party ~ text, data  = train) %>% 
+party_recipe <- recipe(party ~ text, data  = train) %>%     step_tokenize() %>%
+    step_stopwords() %>% 
+    step_stem() %>%
+    step_untokenize() %>%
+    step_ngram(abc, n=3) %>%
+    filter(n=1000)
+freq <- sample %>% 
+  group_by(party) %>% 
+  mutate(rank = row_number(), 
+         `term frequency` = n/) %>%
+  ungroup()
+bind_tf_idf(sample, "party")
     # Add your steps here
-
 head(prep(party_recipe, train) %>% bake(test)) ## Run to view feature matrix after preprocessing
 ```
 
@@ -106,19 +122,17 @@ Q4. Let's add a model and put together a workflow. We will use a logistic regres
 lasso <- logistic_reg(penalty = 0.01, mixture = 1) %>%
   set_mode("classification") %>%
   set_engine("glmnet")
-
-wf <- workflow() %>% 
+wf <- workflow() %>% party_recipe %>% lasso 
   # Add your recipe and model
 ```
 What is the purpose of using a workflow?
-Answer:
+Answer: Using a workflow helps ensure unnecessary steps are not being taken as well as automating other tasks to help streamline a process
 
 Q5. We will use 5-fold cross-validation to evaluate performance on the training data. *Modify the `vfold_cv` function to ensure that each fold has a balanced class distribution.*
 
 Next, run the rest of the chunk to fit the model to each fold and calculate statistics. This may take a couple of minutes to run. Answer the question below.
 ```{r q5, echo=TRUE, tidy=TRUE}
-folds <- vfold_cv(train, v = 5) # Add an argument
-
+folds <- vfold_cv(train, v = 5, breaks = 20) # Add an argument
 fitted <- fit_resamples(
   wf,
   folds,
@@ -127,16 +141,15 @@ fitted <- fit_resamples(
 )
 ```
 Why do we want to stratify the balance the class distribution in each fold?
-Answer: 
+Answer: This helps ensure that each fold is fully representative of all the strata of the data.
 
 Q6. We can now get the predictions from the model and conduct some analyses of the results. Run these lines then answer the question below.
 ```{r q6, echo=TRUE, tidy=TRUE}
 pred_probs <- collect_predictions(fitted, type = "prob")
-
 collect_metrics(fitted)
 ```
 What do these metrics tell us about the performance of the classifier? Discuss each measure in turn.
-Answer:
+Answer: Collect_predictions and collect_metrics help us obtain and format results produced by tuning functions. These metrics can prove the classifier to be accurate.
 
 
 Q7. So far you have considered a single type of model. Let's experiment with these parameters by varying `mixture` and analyzing the results. In addition, we should vary the `penalty` parameter to find an optimal value. Specify a new model with the tunable parameters, then construct a parameter grid (see specific values in the comment below).
@@ -144,13 +157,10 @@ Q7. So far you have considered a single type of model. Let's experiment with the
 Then run the remainder of the chunk to tune the model. This will take a few minutes since we need to fit several different models.
 ```{r q7, echo=TRUE, tidy=TRUE}
 l2 <- # Specify the logistic regression with tunable parameters
-
 # penalty can range from 0.001 to 1, mixture from 0 to 1. 
 # Test four different values in each range for each parameter
 param_grid <- 
-
 wf <- wf %>% update_model(l2)
-
 fitted.2 <- tune_grid(
   wf,
   folds,
@@ -158,7 +168,6 @@ fitted.2 <- tune_grid(
   metrics = metric_set(precision, recall, f_meas, roc_auc),
   control = control_resamples(save_pred = TRUE)
 )
-
 pred_probs.2 <- collect_predictions(fitted.2, type = "prob")
 ```
 
@@ -173,5 +182,7 @@ Analyze the graph above and describe the effects of varying the penalty and mixt
 Answer:
 
 Q9. Discuss the overall results. Is this task more or less difficult than you expected? Are there factors that might make it difficult to predict political affiliation from tweets?
+
+
 
 *This is the end of the assignment. Please submit it following the instructions at the beginning of this document.*
